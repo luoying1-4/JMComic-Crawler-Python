@@ -96,6 +96,22 @@ class JmJsonResp(JmResp):
 
 
 class JmApiResp(JmJsonResp):
+    """
+    移动端 API 响应包装类。
+
+    原始响应示例（resp.text）：
+        {"code": 200, "data": "abc123XYZ..."}
+
+    内部数据流动机制：
+    1. encoded_data: 从原始响应 JSON 中提取 resp.json()['data']（服务端经 AES 加密后的 Base64 密文字符串）。
+       示例: "abc123XYZ..."
+    2. decoded_data: 将 encoded_data 经 Base64 解码 + AES-ECB 解密并去除 Padding 后，得到的明文字符串（通常为 JSON 字符串）。
+       示例: '{"msg": "Jcoin:40 EXP:40"}'
+    3. res_data: 通过 json.loads 将 decoded_data 解析为 Python 字典/列表（Any）。
+       示例: {'msg': 'Jcoin:40 EXP:40'}
+    4. model_data: 将 res_data 包装为便于属性访问的 AdvancedDict 字典对象。
+       示例: model_data.msg -> 'Jcoin:40 EXP:40'
+    """
 
     def __init__(self, resp, ts: str):
         super().__init__(resp)
@@ -124,6 +140,8 @@ class JmApiResp(JmJsonResp):
 
     def require_have_data(self):
         data = self.encoded_data
+        if data is None:
+            ExceptionTool.raises_resp(f'响应数据为空: {self.text}', self)
         if isinstance(data, list) and len(data) == 0 and self.json().get('errorMsg', None):
             ExceptionTool.raises_resp(f'data返回值异常: {self.text}', self)
 
@@ -140,11 +158,31 @@ class JmApiResp(JmJsonResp):
         self.require_have_data()
         return AdvancedDict(self.res_data)
 
+
 # album-comment
 class JmAlbumCommentResp(JmJsonResp):
 
+    @property
     def is_success(self) -> bool:
         return super().is_success and self.json()['err'] is False
+
+
+class JmDailyCheckinResp(JmResp):
+    """
+    每日签到打卡响应类
+    """
+    CODE_SUCCESS = 0             # 签到成功
+    CODE_ALREADY_CHECKED_IN = 1  # 重复签到（今日已签）
+
+    def __init__(self, resp, code: int, msg: str, raw_data: dict = None):
+        super().__init__(resp)
+        self.code: int = code      # 0=签到成功, 1=重复签到
+        self.status: int = code    # 兼容字段，值等同于 code
+        self.msg: str = msg        # 透传服务端的提示信息或奖励内容
+        self.raw_data: dict = raw_data or {}
+
+    def __repr__(self):
+        return f'<JmDailyCheckinResp code={self.code} msg={self.msg!r}>'
 
 
 """
@@ -220,9 +258,75 @@ class JmUserClient:
         """
         raise NotImplementedError
 
+    def album_pagination(self,
+                         jm_id: str,
+                         page=1,
+                         series=1,
+                         with_ad_wcm=1,
+                         need_total=True,
+                         ) -> JmAlbumCommentPage:
+        """
+        获取本子评论分页。
+
+        推荐直接遍历评论页，并通过 comment.replies 读取回评：
+
+        ```
+        def show_comment(comment, indent=''):
+            print(
+                indent,
+                comment.nickname or comment.username,
+                comment.content,
+                '剧透' if comment.is_spoiler else '非剧透',
+            )
+            for reply in comment.replies:
+                show_comment(reply, indent + '  ')
+
+        comment_page = client.album_pagination('123456', page=1)
+        print(comment_page.total)          # 全部分页的主评论总数
+        print(comment_page.comment_count)  # 当前页主评论 + 所有层级回评
+        for comment in comment_page:
+            show_comment(comment)
+        ```
+
+        返回字段说明：
+
+        - page.total：全部分页的主评论总数。
+        - page.comment_count：当前页主评论加所有层级回评的数量。
+        - len(page)：当前页主评论数量，不包含回评。
+        - comment.raw_data、page.raw_data：统一为 AdvancedDict。
+        - HTML 客户端的 comment.likes 固定为 None。
+        - HTML 客户端的 comment.user_id 仅在头像地址包含数字 ID 时可用。
+        - HTML 客户端的 comment.album_id 在评论 DOM 缺少本子链接时为 None。
+
+        :param jm_id: album_id/photo_id
+        :param page: 页码，从 1 开始
+        :param series: 网页端评论区的系列标记，API 端忽略
+        :param with_ad_wcm: 网页端广告标记，API 端忽略
+        :param need_total: 网页端是否额外请求本子详情以获取评论总数；API 端忽略
+        :return: JmAlbumCommentPage
+        """
+        raise NotImplementedError
+
+    def forum_pagination(self,
+                         page=1,
+                         with_ad_wcm=1,
+                         ) -> JmAlbumCommentPage:
+        """
+        获取全站评论分页。
+
+        HTML 客户端使用 /ajax/forum_more；API 客户端使用不带 aid 的 /forum。
+        HTML 客户端不提供评论总数，page.total 和 page.page_count 为 None；
+        API 客户端返回全站主评论总数。
+
+        :param page: 页码，从 1 开始
+        :param with_ad_wcm: 网页端广告标记，API 端忽略
+        :return: JmAlbumCommentPage
+        """
+        raise NotImplementedError
+
     def favorite_folder(self,
                         page=1,
-                        order_by=JmMagicConstants.ORDER_BY_LATEST,
+                        order_by=JmMagicConstants.ORDER_FF_FAVORITE_TIME,
                         folder_id='0',
                         username='',
                         ) -> JmFavoritePage:
@@ -230,7 +334,7 @@ class JmUserClient:
         获取收藏了的漫画，文件夹默认是全部
         :param folder_id: 文件夹id
         :param page: 分页
-        :param order_by: 排序
+        :param order_by: 排序（JmMagicConstants.ORDER_FF_FAVORITE_TIME / ORDER_FF_UPDATE_TIME）
         :param username: 用户名
         """
         raise NotImplementedError
@@ -241,6 +345,84 @@ class JmUserClient:
                            ):
         """
         把漫画加入收藏夹
+        """
+        raise NotImplementedError
+
+    def delete_favorite_album(self,
+                              album_id,
+                              folder_id='0',
+                              ):
+        """
+        从收藏夹移除漫画
+        """
+        raise NotImplementedError
+
+    def get_daily(self,
+                  user_id: str | None = None,
+                  ) -> Union[JmApiResp, JmJsonResp]:
+        """
+        获取每日签到信息与日历打卡记录。
+        两端均返回包含活动信息、打卡记录、背景图与打卡状态的完整响应对象：
+        - HTML 客户端 (JmJsonResp)：明文 JSON，可通过 resp.json() 获取字典，或 resp.model() 属性访问。
+        - API 客户端 (JmApiResp)：加密响应，可通过 resp.res_data 获取解密字典，或 resp.model_data 属性访问。
+
+        两端返回数据结构示例：
+
+        1. HTML 客户端 (JmJsonResp.json() / JmJsonResp.model()):
+        {
+          "dateArray": [11],                           # 当月已签到的日期数组
+          "dateMiss": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], # 当月漏签的日期数组
+          "dateEvent": [                               # 特殊活动/双倍奖励日期
+            "2026-09-05 00:00:00",
+            "2026-09-06 00:00:00"
+          ],
+          "oldStep": 1,                                # 连续签到天数
+          "error": "finished",                         # 今日打卡状态（若今日已签到则为 "finished"）
+          "pc_img": "/media/logo/pc/9PC.jpg",          # 签到弹窗 PC 背景图
+          "mb_img": "/media/logo/phone/9PH.jpg"        # 签到弹窗移动端背景图
+        }
+
+        2. API 客户端 (JmApiResp.res_data / JmApiResp.model_data):
+        {
+          "daily_id": 72,                              # 当前签到活动ID
+          "event_name": "9月-签到活动",                # 活动标题
+          "currentProgress": "14.3%",                  # 连续进度百分比
+          "three_days_coin": "150",                    # 满3天奖励金币
+          "three_days_exp": "150",                     # 满3天奖励经验
+          "seven_days_coin": "350",                    # 满7天奖励金币
+          "seven_days_exp": "350",                     # 满7天奖励经验
+          "background_pc": "/media/logo/pc/9PC.jpg",   # 背景图路径
+          "background_phone": "/media/logo/phone/9PH.jpg",
+          "record": [                                  # 按周划分的完整签到日历矩阵
+            [
+              {"date": "01", "signed": false, "bonus": false},
+              {"date": "02", "signed": false, "bonus": false}
+            ],
+            [
+              {"date": "11", "signed": true, "bonus": false},
+              {"date": "12", "signed": null, "bonus": true}
+            ]
+          ]
+        }
+
+        :param user_id: 用户ID，API 客户端默认读取当前登录用户的uid
+        """
+        raise NotImplementedError
+
+    def daily_checkin(self,
+                      daily_id: str | None = None,
+                      user_id: str | None = None,
+                      ) -> JmDailyCheckinResp:
+        """
+        执行每日打卡签到。
+        返回 JmDailyCheckinResp 对象：
+        - code=0 (或 status=0): 签到成功，msg 包含奖励信息（如金币/经验）
+        - code=1 (或 status=1): 重复签到（今日已完成打卡）
+        - 其余非预期错误（未登录、网络失败、活动失效等）直接抛出异常
+
+        :param daily_id: 打卡任务ID，未提供时会自动获取
+        :param user_id: 用户ID，API 客户端默认读取当前登录用户的uid
+        :return: JmDailyCheckinResp
         """
         raise NotImplementedError
 
@@ -271,7 +453,7 @@ class JmImageClient:
 
     # noinspection PyMethodMayBeStatic
     def save_image_resp(self, decode_image, img_save_path, img_url, resp, scramble_id):
-        resp.transfer_to(img_save_path, scramble_id, decode_image, img_url)
+        return resp.transfer_to(img_save_path, scramble_id, decode_image, img_url)
 
     def download_by_image_detail(self,
                                  image: JmImageDetail,
@@ -513,6 +695,7 @@ class JmcomicClient(
         return JmModuleConfig.get_html_domain_all(self.get_root_postman())
 
     def get_html_domain_all_via_github(self):
+        """已废弃，请使用 get_html_domain_all。"""
         return JmModuleConfig.get_html_domain_all_via_github(self.get_root_postman())
 
     # noinspection PyMethodMayBeStatic
@@ -540,7 +723,7 @@ class JmcomicClient(
 
     def favorite_folder_gen(self,
                             page=1,
-                            order_by=JmMagicConstants.ORDER_BY_LATEST,
+                            order_by=JmMagicConstants.ORDER_FF_FAVORITE_TIME,
                             folder_id='0',
                             username='',
                             ) -> Generator[JmFavoritePage, Dict, None]:
@@ -554,6 +737,87 @@ class JmcomicClient(
         }
 
         yield from self.do_page_iter(params, page, self.favorite_folder)
+
+    def album_pagination_gen(self,
+                             jm_id: str,
+                             page=1,
+                             series=1,
+                             with_ad_wcm=1,
+                             need_total=True,
+                             ) -> Generator[JmAlbumCommentPage, None, None]:
+        """
+        逐页获取本子评论。
+
+        ```
+        for comment_page in client.album_pagination_gen('123456'):
+            for comment in comment_page:
+                print(comment.content, comment.is_spoiler, len(comment.replies))
+        ```
+        """
+        first_page = True
+        total = None
+        while True:
+            comment_page = self.album_pagination(
+                jm_id,
+                page=page,
+                series=series,
+                with_ad_wcm=with_ad_wcm,
+                need_total=need_total if first_page else False,
+            )
+
+            if first_page:
+                total = comment_page.total
+                first_page = False
+            else:
+                comment_page.total = total
+
+            yield comment_page
+
+            if comment_page.page_count is not None:
+                if page >= comment_page.page_count:
+                    break
+            else:
+                # HTML 响应没有评论总数，通过分页按钮中是否存在下一页判断是否继续。
+                has_next_page = any(
+                    int(match.group(1)) == page + 1
+                    for match in JmcomicText.pattern_html_comment_next_page.finditer(comment_page.raw_html or '')
+                )
+                if not has_next_page:
+                    break
+
+            page += 1
+
+    def forum_pagination_gen(self,
+                             page=1,
+                             with_ad_wcm=1,
+                             ) -> Generator[JmAlbumCommentPage, None, None]:
+        """逐页获取全站评论；HTML 客户端遇到服务端重复返回的末页时停止。"""
+        # 仅供 HTML 客户端使用；API 客户端通过 total 计算 page_count。
+        previous_comment_ids = None
+        while True:
+            comment_page = self.forum_pagination(
+                page=page,
+                with_ad_wcm=with_ad_wcm,
+            )
+            comment_ids = tuple(comment.comment_id for comment in comment_page)
+            if not comment_ids:
+                break
+
+            # HTML 响应没有 total/has_more，只能通过重复页识别末页。
+            if comment_page.page_count is None and comment_ids == previous_comment_ids:
+                break
+
+            yield comment_page
+
+            if comment_page.page_count is not None:
+                # API 响应包含 total，page_count 可直接判断末页。
+                if page >= comment_page.page_count:
+                    break
+            else:
+                # HTML 客户端保存本页 ID，供下一次请求检测重复页。
+                previous_comment_ids = comment_ids
+
+            page += 1
 
     def search_gen(self,
                    search_query: str,
@@ -629,3 +893,426 @@ class JmcomicClient(
         if self.client_key == ctype.client_key:
             return True
         return False
+
+
+"""
+
+Async Client Interface — 对标 sync JmcomicClient 的异步版本
+
+"""
+
+
+class AsyncJmcomicClient:
+    """
+    异步客户端接口基类，对标 sync 的 JmcomicClient。
+
+    - 所有方法签名和 sync 版完全对齐
+    - 通过 REGISTRY_ASYNC_CLIENT 注册（配置项: client.async_impl）
+    - 由 JmOption.new_async_client() 工厂方法创建
+    """
+
+    client_key = None
+
+    # -- JmDetailClient --
+
+    async def get_album_detail(self, album_id) -> JmAlbumDetail:
+        raise NotImplementedError
+
+    async def get_photo_detail(self,
+                               photo_id,
+                               fetch_album=True,
+                               fetch_scramble_id=True,
+                               ) -> JmPhotoDetail:
+        raise NotImplementedError
+
+    async def check_photo(self, photo: JmPhotoDetail):
+        """
+        检查 photo 的 from_album / page_arr / data_original_domain 是否齐全，
+        缺失则请求补全。对齐 sync JmDetailClient.check_photo。
+        """
+        # 检查 from_album
+        if photo.from_album is None:
+            photo.from_album = await self.get_album_detail(photo.album_id)
+
+        # 检查 page_arr 和 data_original_domain
+        if photo.page_arr is None or photo.data_original_domain is None:
+            new = await self.get_photo_detail(photo.photo_id, False)
+            new.from_album = photo.from_album
+            photo.__dict__.update(new.__dict__)
+
+    # -- JmSearchAlbumClient --
+
+    async def search(self,
+                     search_query: str,
+                     page: int,
+                     main_tag: int,
+                     order_by: str,
+                     time: str,
+                     category: str,
+                     sub_category: Optional[str],
+                     ) -> JmSearchPage:
+        raise NotImplementedError
+
+    async def search_site(self,
+                          search_query: str,
+                          page: int = 1,
+                          order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                          time: str = JmMagicConstants.TIME_ALL,
+                          category: str = JmMagicConstants.CATEGORY_ALL,
+                          sub_category: Optional[str] = None,
+                          ):
+        return await self.search(search_query, page, 0, order_by, time, category, sub_category)
+
+    async def search_work(self,
+                          search_query: str,
+                          page: int = 1,
+                          order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                          time: str = JmMagicConstants.TIME_ALL,
+                          category: str = JmMagicConstants.CATEGORY_ALL,
+                          sub_category: Optional[str] = None,
+                          ):
+        return await self.search(search_query, page, 1, order_by, time, category, sub_category)
+
+    async def search_author(self,
+                            search_query: str,
+                            page: int = 1,
+                            order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                            time: str = JmMagicConstants.TIME_ALL,
+                            category: str = JmMagicConstants.CATEGORY_ALL,
+                            sub_category: Optional[str] = None,
+                            ):
+        return await self.search(search_query, page, 2, order_by, time, category, sub_category)
+
+    async def search_tag(self,
+                         search_query: str,
+                         page: int = 1,
+                         order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                         time: str = JmMagicConstants.TIME_ALL,
+                         category: str = JmMagicConstants.CATEGORY_ALL,
+                         sub_category: Optional[str] = None,
+                         ):
+        return await self.search(search_query, page, 3, order_by, time, category, sub_category)
+
+    async def search_actor(self,
+                           search_query: str,
+                           page: int = 1,
+                           order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                           time: str = JmMagicConstants.TIME_ALL,
+                           category: str = JmMagicConstants.CATEGORY_ALL,
+                           sub_category: Optional[str] = None,
+                           ):
+        return await self.search(search_query, page, 4, order_by, time, category, sub_category)
+
+    async def do_page_iter(self, params: dict, page: int, get_page_method):
+        from math import inf
+        from typing import Optional, Dict
+
+        def update(value: Optional[Dict], page: int, page_content):
+            if value is None:
+                return page + 1, page_content.page_count
+
+            ExceptionTool.require_true(isinstance(value, dict), 'require dict params')
+
+            # 根据外界传递的参数，更新params和page
+            page = value.get('page', page)
+            params.update(value)
+
+            return page, inf
+
+        total = inf
+        while page <= total:
+            params['page'] = page
+            page_content = await get_page_method(**params)
+            value = yield page_content
+            page, total = update(value, page, page_content)
+
+    async def search_gen(self,
+                         search_query: str,
+                         main_tag=0,
+                         page: int = 1,
+                         order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                         time: str = JmMagicConstants.TIME_ALL,
+                         category: str = JmMagicConstants.CATEGORY_ALL,
+                         sub_category: Optional[str] = None,
+                         ):
+        """
+        异步搜索结果的生成器。
+        使用示例:
+        ```
+        async for page in client.search_gen('无修正'):
+            pass
+        ```
+        同时支持外界 asend 参数改变搜索的设定:
+        ```
+        gen = client.search_gen('MANA')
+        page_1 = await gen.asend(None)
+        page_3 = await gen.asend({'page': 3})
+        ```
+        """
+        params = {
+            'search_query': search_query,
+            'main_tag': main_tag,
+            'order_by': order_by,
+            'time': time,
+            'category': category,
+            'sub_category': sub_category,
+        }
+
+        aiter = self.do_page_iter(params, page, self.search)
+        value = None
+        while True:
+            try:
+                page_content = await aiter.asend(value)
+                value = yield page_content
+            except StopAsyncIteration:
+                break
+
+    # -- JmCategoryClient --
+
+    async def categories_filter(self,
+                                page: int,
+                                time: str,
+                                category: str,
+                                order_by: str,
+                                sub_category: Optional[str] = None,
+                                ) -> JmCategoryPage:
+        raise NotImplementedError
+
+    async def categories_filter_gen(self,
+                                    page: int = 1,
+                                    time: str = JmMagicConstants.TIME_ALL,
+                                    category: str = JmMagicConstants.CATEGORY_ALL,
+                                    order_by: str = JmMagicConstants.ORDER_BY_LATEST,
+                                    sub_category: Optional[str] = None,
+                                    ):
+        """异步分类结果生成器，支持通过 asend 动态更新分页参数。"""
+        params = {
+            'time': time,
+            'category': category,
+            'order_by': order_by,
+            'sub_category': sub_category,
+        }
+
+        aiter = self.do_page_iter(params, page, self.categories_filter)
+        value = None
+        while True:
+            try:
+                page_content = await aiter.asend(value)
+                value = yield page_content
+            except StopAsyncIteration:
+                break
+
+    async def month_ranking(self,
+                            page: int = 1,
+                            category: str = JmMagicConstants.CATEGORY_ALL,
+                            ):
+        return await self.categories_filter(page, JmMagicConstants.TIME_MONTH, category,
+                                            JmMagicConstants.ORDER_BY_VIEW)
+
+    async def week_ranking(self,
+                           page: int = 1,
+                           category: str = JmMagicConstants.CATEGORY_ALL,
+                           ):
+        return await self.categories_filter(page, JmMagicConstants.TIME_WEEK, category,
+                                            JmMagicConstants.ORDER_BY_VIEW)
+
+    async def day_ranking(self,
+                          page: int = 1,
+                          category: str = JmMagicConstants.CATEGORY_ALL,
+                          ):
+        return await self.categories_filter(page, JmMagicConstants.TIME_TODAY, category,
+                                            JmMagicConstants.ORDER_BY_VIEW)
+
+    # -- JmUserClient --
+
+    async def login(self, username: str, password: str):
+        raise NotImplementedError
+
+    async def favorite_folder(self,
+                              page=1,
+                              order_by=JmMagicConstants.ORDER_FF_FAVORITE_TIME,
+                              folder_id='0',
+                              username='',
+                              ) -> JmFavoritePage:
+        raise NotImplementedError
+
+    async def favorite_folder_gen(self,
+                                  page=1,
+                                  order_by=JmMagicConstants.ORDER_FF_FAVORITE_TIME,
+                                  folder_id='0',
+                                  username='',
+                                  ):
+        """
+        见 search_gen
+        """
+        params = {
+            'order_by': order_by,
+            'folder_id': folder_id,
+            'username': username,
+        }
+
+        aiter = self.do_page_iter(params, page, self.favorite_folder)
+        value = None
+        while True:
+            try:
+                page_content = await aiter.asend(value)
+                value = yield page_content
+            except StopAsyncIteration:
+                break
+
+    async def add_favorite_album(self, album_id, folder_id='0'):
+        raise NotImplementedError
+
+    async def delete_favorite_album(self, album_id, folder_id='0'):
+        raise NotImplementedError
+
+    async def get_daily(self, user_id: str | None = None) -> JmApiResp:
+        """
+        获取每日签到信息与日历打卡记录
+        :param user_id: 用户ID，默认读取当前登录用户的uid
+        """
+        raise NotImplementedError
+
+    async def daily_checkin(self, daily_id: str | None = None, user_id: str | None = None) -> JmDailyCheckinResp:
+        """
+        执行每日打卡签到（异步）。
+        返回 JmDailyCheckinResp 对象：
+        - code=0 (或 status=0): 签到成功，msg 包含奖励信息（如金币/经验）
+        - code=1 (或 status=1): 重复签到（今日已完成打卡）
+        - 其余非预期错误（未登录、网络失败、活动失效等）直接抛出异常
+
+        :param daily_id: 打卡任务ID，未提供时会自动请求 get_daily 获取
+        :param user_id: 用户ID，默认读取当前登录用户的uid
+        :return: JmDailyCheckinResp
+        """
+        raise NotImplementedError
+
+    async def album_comment(self,
+                            video_id,
+                            comment,
+                            originator='',
+                            status='true',
+                            comment_id=None,
+                            **kwargs,
+                            ) -> JmAlbumCommentResp:
+        raise NotImplementedError
+
+    async def album_pagination(self,
+                               jm_id: str,
+                               page=1,
+                               series=1,
+                               with_ad_wcm=1,
+                               need_total=True,
+                               ) -> JmAlbumCommentPage:
+        """
+        获取本子评论分页。
+
+        异步客户端使用移动端 API，返回值与同步 JmApiClient 一致；
+        series 和 with_ad_wcm 仅用于保持同步、异步方法签名一致。
+        """
+        raise NotImplementedError
+
+    async def forum_pagination(self,
+                               page=1,
+                               with_ad_wcm=1,
+                               ) -> JmAlbumCommentPage:
+        """
+        异步获取全站评论分页。
+
+        with_ad_wcm 仅用于保持同步、异步方法签名一致。
+        """
+        raise NotImplementedError
+
+    async def album_pagination_gen(self,
+                                   jm_id: str,
+                                   page=1,
+                                   series=1,
+                                   with_ad_wcm=1,
+                                   need_total=True,
+                                   ):
+        """异步逐页获取本子评论。"""
+        first_page = True
+        total = None
+        while True:
+            comment_page = await self.album_pagination(
+                jm_id,
+                page=page,
+                series=series,
+                with_ad_wcm=with_ad_wcm,
+                need_total=need_total if first_page else False,
+            )
+
+            if first_page:
+                total = comment_page.total
+                first_page = False
+            else:
+                comment_page.total = total
+
+            yield comment_page
+
+            if comment_page.page_count is not None:
+                if page >= comment_page.page_count:
+                    break
+            elif not comment_page:
+                break
+
+            page += 1
+
+    async def forum_pagination_gen(self,
+                                   page=1,
+                                   with_ad_wcm=1,
+                                   ):
+        """异步逐页获取全站评论；异步客户端当前只有 API 实现。"""
+        # API 正常通过 total 计算 page_count；保存上一页 ID 仅用于异常响应缺少 total 时兜底。
+        previous_comment_ids = None
+        while True:
+            comment_page = await self.forum_pagination(
+                page=page,
+                with_ad_wcm=with_ad_wcm,
+            )
+            comment_ids = tuple(comment.comment_id for comment in comment_page)
+            if not comment_ids:
+                break
+
+            if comment_page.page_count is None and comment_ids == previous_comment_ids:
+                break
+
+            yield comment_page
+
+            if comment_page.page_count is not None and page >= comment_page.page_count:
+                break
+
+            previous_comment_ids = comment_ids
+            page += 1
+
+    # -- 域名 / 缓存管理 --
+
+    def get_domain_list(self) -> List[str]:
+        raise NotImplementedError
+
+    def set_domain_list(self, domain_list: List[str]):
+        raise NotImplementedError
+
+    def set_cache_dict(self, cache_dict: Optional[Dict]):
+        raise NotImplementedError
+
+    def get_cache_dict(self) -> Optional[Dict]:
+        raise NotImplementedError
+
+    # -- 生命周期 --
+
+    async def close(self):
+        raise NotImplementedError
+
+    async def __aenter__(self):
+        await self.setup()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def setup(self):
+        pass
+
+    async def get_jm_image(self, download_url):
+        raise NotImplementedError

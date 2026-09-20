@@ -1,3 +1,7 @@
+from datetime import datetime
+from html.parser import HTMLParser
+from urllib.parse import unquote, urlparse
+
 from PIL import Image
 
 from .jm_exception import *
@@ -26,7 +30,7 @@ class JmcomicText:
     pattern_html_album_album_id = compile(r'<span class="number">.*?：JM(\d+)</span>')
     pattern_html_album_scramble_id = compile(r'var scramble_id = (\d+);')
     pattern_html_album_name = compile(r'id="book-name"[^>]*?>([\s\S]*?)<')
-    pattern_html_album_description = compile(r'叙述：([\s\S]*?)</h2>')
+    pattern_html_album_description = compile(r'[叙|敘]述：([\s\S]*?)</h2>')
     pattern_html_album_episode_list = compile(r'data-album="(\d+)"[^>]*>[\s\S]*?第(\d+)[话話]([\s\S]*?)<[\s\S]*?>')
     pattern_html_album_page_count = compile(r'<span class="pagecount">.*?:(\d+)</span>')
     pattern_html_album_pub_date = compile(r'>上架日期 : (.*?)</span>')
@@ -58,11 +62,22 @@ class JmcomicText:
     pattern_html_album_views = compile(r'<span>(.*?)</span>\n *<span>(次觀看|观看次数|次观看次数)</span>')
     # 評論(div)
     pattern_html_album_comment_count = compile(r'<div class="badge"[^>]*?id="total_video_comments">(\d+)</div>'), 0
+    # 是否已收藏 (HTML端通过主本子收藏按钮带有 btn-primary 判定)
+    pattern_html_album_is_favorite = compile(
+        r'<a\s+[^>]*?(id="album_favorite_\d+"[^>]*?class="[^"]*?'
+        r'\bbtn-primary\b|class="[^"]*?\bbtn-primary\b[^>]*?id="album_favorite_\d+)[^>]*?>'), False
+    # 是否已点赞/喜欢 (HTML端通过顶栏爱心按钮带有 style="color:red" 判定)
+    pattern_html_album_liked = compile(
+        r'id=[\'"]love_likes_\d+[\'"][^>]*>\s*<i[^>]+style=[\'"][^\'"]*color:\s*(red)[^\'"]*[\'"]'), False
 
     # 提取接口返回值信息
     pattern_ajax_favorite_msg = compile(r'</button>(.*?)</div>')
     # 提取api接口返回值里的json，防止返回值里有无关日志导致json解析报错
     pattern_api_response_json_object = compile(r'\{[\s\S]*?}')
+
+    pattern_html_comment_next_page = compile(r'id=["\']p_album_comments_\d+_(\d+)["\']')
+    # 网页端签到活动ID (data-dailyid)
+    pattern_html_daily_id = compile(r'data-dailyid="(\d+)"')
 
     @classmethod
     def parse_to_jm_domain(cls, text: str):
@@ -136,6 +151,19 @@ class JmcomicText:
         )
 
     @classmethod
+    def parse_daily_id(cls, html: str, default=None) -> Optional[str]:
+        """
+        从网页文本（如禁漫首页）中提取每日签到活动 ID（data-dailyid）
+        """
+        return PatternTool.match_or_default(
+            html,
+            cls.pattern_html_daily_id,
+            default,
+        )
+
+    parse_html_daily_id = parse_daily_id
+
+    @classmethod
     def reflect_new_instance(cls, html: str, cls_field_prefix: str, clazz: type):
 
         def match_field(field_name: str, pattern: Union[Pattern, List[Pattern]], text):
@@ -180,10 +208,14 @@ class JmcomicText:
 
             if field_value is None:
                 if default is None:
+                    msg_tail = '' if JmModuleConfig.FLAG_DUMP_HTML_ON_REGEX_ERROR else \
+                        ('，可通过设置 JmModuleConfig.FLAG_DUMP_HTML_ON_REGEX_ERROR = True '
+                         '将响应文本保存到文件'
+                         )
                     ExceptionTool.raises_regex(
                         f"文本没有匹配上字段：字段名为'{field_name}'，pattern: [{pattern}]"
                         + (f"\n响应文本=[{html}]" if len(html) < 200 else
-                           f'响应文本过长(len={len(html)})，不打印'
+                           f'响应文本过长(len={len(html)})，不打印{msg_tail}'
                            ),
                         html=html,
                         pattern=pattern,
@@ -350,7 +382,7 @@ class JmcomicText:
         try:
             import zhconv
             return zhconv.convert(s, target)
-        except ImportError as e:
+        except ImportError:
             jm_log('zhconv.error', '繁简转换失败，未安装zhconv，请先使用命令安装: [pip install zhconv]')
             return s
         except Exception as e:
@@ -431,8 +463,154 @@ class JmcomicText:
         else:
             return 0  # 相等
 
+
 # 支持dsl: #{???} -> os.getenv(???)
 JmcomicText.dsl_replacer.add_dsl_and_replacer(r'\$\{(.*?)\}', JmcomicText.match_os_env)
+
+
+class HtmlTextParser(HTMLParser):
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == 'br':
+            self.parts.append('\n')
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+class CommentParser(HTMLParser):
+    void_elements = {
+        'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+        'link', 'meta', 'param', 'source', 'track', 'wbr',
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.comments = []
+        self.comment_stack = []
+
+    def _inside_class(self, class_name):
+        for frame in reversed(self.stack):
+            if class_name in frame['classes']:
+                return True
+            if frame['is_comment_root']:
+                return False
+        return False
+
+    def _start_comment(self, attrs):
+        parent = self.comment_stack[-1] if self.comment_stack else None
+        comment = {
+            'CID': (attrs.get('data-cid') or '').strip('{}'),
+            'AID': None,
+            'UID': attrs.get('data-userid') or None,
+            'parent_CID': parent['CID'] if parent is not None else None,
+            'content_parts': [],
+            'username': None,
+            'nickname_parts': [],
+            'is_spoiler': False,
+            'addtime_parts': [],
+            'likes': None,
+            'replys': [],
+        }
+        self.comment_stack.append(comment)
+
+    def _finish_comment(self):
+        comment = self.comment_stack.pop()
+        comment['content'] = ''.join(comment.pop('content_parts')).strip()
+        comment['nickname'] = ''.join(comment.pop('nickname_parts')).strip()
+        comment['addtime'] = ''.join(comment.pop('addtime_parts')).strip()
+        if self.comment_stack:
+            self.comment_stack[-1]['replys'].append(comment)
+        else:
+            self.comments.append(comment)
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attrs = dict(attrs)
+        classes = set((attrs.get('class') or '').split())
+        is_comment_root = (
+                'timeline' in classes
+                and attrs.get('data-cid') is not None
+        )
+        self.stack.append({
+            'tag': tag,
+            'classes': classes,
+            'is_comment_root': is_comment_root,
+        })
+
+        if is_comment_root:
+            self._start_comment(attrs)
+
+        if not self.comment_stack:
+            if tag in self.void_elements:
+                self.stack.pop()
+            return
+
+        comment = self.comment_stack[-1]
+
+        if 'disclose' in classes:
+            comment['is_spoiler'] = True
+
+        if tag == 'br' and self._inside_class('timeline-content'):
+            comment['content_parts'].append('\n')
+
+        if tag == 'a':
+            path = urlparse(attrs.get('href') or '').path
+            if self._inside_class('timeline-left') and '/user/' in path:
+                username = path.split('/user/', 1)[1].split('/', 1)[0]
+                comment['username'] = unquote(username)
+            if self._inside_class('timeline-ft'):
+                if '/photo/' in path:
+                    comment['AID'] = path.split('/photo/', 1)[1].split('/', 1)[0]
+                elif '/album/' in path:
+                    comment['AID'] = path.split('/album/', 1)[1].split('/', 1)[0]
+
+        if tag == 'img':
+            path = urlparse(attrs.get('src') or '').path
+            if self._inside_class('timeline-left') and '/media/users/' in path:
+                explicit_user_id = attrs.get('data-userid')
+                if explicit_user_id:
+                    comment['UID'] = explicit_user_id
+
+                filename = path.split('/media/users/', 1)[1].split('/', 1)[0]
+                user_id = filename.rsplit('.', 1)[0]
+                if comment['UID'] is None and user_id.isdigit():
+                    comment['UID'] = user_id
+
+        if tag in self.void_elements:
+            self.stack.pop()
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]['tag'] != tag:
+                continue
+
+            closing_frames = self.stack[index:]
+            del self.stack[index:]
+            for frame in reversed(closing_frames):
+                if not frame['is_comment_root']:
+                    continue
+                self._finish_comment()
+            return
+
+    def handle_data(self, data):
+        if not self.comment_stack:
+            return
+
+        comment = self.comment_stack[-1]
+
+        if self._inside_class('timeline-username'):
+            comment['nickname_parts'].append(data)
+        if self._inside_class('timeline-date'):
+            comment['addtime_parts'].append(data)
+        if self._inside_class('timeline-content'):
+            comment['content_parts'].append(data)
 
 
 class PatternTool:
@@ -501,7 +679,7 @@ class JmPageTool:
     )
 
     # 收藏夹的收藏总数
-    pattern_html_favorite_total = compile(r' : (\d+)[^/]*/\D*(\d+)')
+    pattern_html_favorite_total = compile(r'(?:總數|总数)\s*:\s*(\d+)\s*/\s*(\d+)')
 
     # 所有的收藏夹
     pattern_html_favorite_folder_list = [
@@ -510,7 +688,7 @@ class JmPageTool:
     ]
 
     @classmethod
-    def parse_html_to_search_page(cls, html: str) -> JmSearchPage:
+    def parse_html_to_search_page(cls, html: str, page_number: Optional[int] = None) -> JmSearchPage:
         # 1. 检查是否失败
         PatternTool.require_not_match(
             html,
@@ -539,10 +717,10 @@ class JmPageTool:
                 album_id, dict(name=title, tags=tags)  # 改成name是为了兼容 parse_api_resp_to_page
             ))
 
-        return JmSearchPage(content, total)
+        return JmSearchPage(content, total, page_number)
 
     @classmethod
-    def parse_html_to_category_page(cls, html: str) -> JmSearchPage:
+    def parse_html_to_category_page(cls, html: str, page_number: Optional[int] = None) -> JmSearchPage:
         content = []
         total = int(PatternTool.match_or_default(html, *cls.pattern_html_search_total))
 
@@ -554,10 +732,10 @@ class JmPageTool:
                 album_id, dict(name=title, tags=tags)  # 改成name是为了兼容 parse_api_resp_to_page
             ))
 
-        return JmSearchPage(content, total)
+        return JmSearchPage(content, total, page_number)
 
     @classmethod
-    def parse_html_to_favorite_page(cls, html: str) -> JmFavoritePage:
+    def parse_html_to_favorite_page(cls, html: str, page_number: Optional[int] = None) -> JmFavoritePage:
         total = int(PatternTool.require_match(
             html,
             cls.pattern_html_favorite_total,
@@ -577,10 +755,10 @@ class JmPageTool:
         folder_list_raw = p2.findall(folder_list_text)
         folder_list = [{'name': fname, 'FID': fid} for fid, fname in folder_list_raw]
 
-        return JmFavoritePage(content, folder_list, total)
+        return JmFavoritePage(content, folder_list, total, page_number)
 
     @classmethod
-    def parse_api_to_search_page(cls, data: AdvancedDict) -> JmSearchPage:
+    def parse_api_to_search_page(cls, data: AdvancedDict, page_number: Optional[int] = None) -> JmSearchPage:
         """
         model_data: {
           "search_query": "MANA",
@@ -606,10 +784,10 @@ class JmPageTool:
         """
         total: int = int(data.total or 0)  # 2024.1.5 data.total可能为None
         content = cls.adapt_content(data.content)
-        return JmSearchPage(content, total)
+        return JmSearchPage(content, total, page_number)
 
     @classmethod
-    def parse_api_to_favorite_page(cls, data: AdvancedDict) -> JmFavoritePage:
+    def parse_api_to_favorite_page(cls, data: AdvancedDict, page_number: Optional[int] = None) -> JmFavoritePage:
         """
         {
           "list": [
@@ -650,7 +828,67 @@ class JmPageTool:
         content = cls.adapt_content(data.list)
         folder_list = data.get('folder_list', [])
 
-        return JmFavoritePage(content, folder_list, total)
+        return JmFavoritePage(content, folder_list, total, page_number)
+
+    @classmethod
+    def parse_api_to_album_comment_page(cls,
+                                        data: AdvancedDict,
+                                        page_number=None,
+                                        ) -> JmAlbumCommentPage:
+        def parse_comment(item):
+            item_data = getattr(item, 'src_dict', item) or {}
+            parser = HtmlTextParser()
+            parser.feed(item_data.get('content') or '')
+            parser.close()
+            comment = JmAlbumComment(item)
+            comment.content = ''.join(parser.parts).strip()
+            comment.replies = [
+                parse_comment(reply.raw_data)
+                for reply in comment.replies
+            ]
+            return comment
+
+        content = [
+            parse_comment(item)
+            for item in data.get('list', []) or []
+        ]
+
+        total = data.get('total')
+        if total is not None:
+            try:
+                total = int(total)
+            except (TypeError, ValueError):
+                total = None
+
+        return JmAlbumCommentPage(
+            content=content,
+            total=total,
+            page_number=page_number,
+            raw_data=data,
+        )
+
+    @classmethod
+    def parse_html_to_album_comment_page(cls,
+                                         data: AdvancedDict,
+                                         page_number=None,
+                                         ) -> JmAlbumCommentPage:
+        raw_html = data.get('code')
+        if raw_html is None:
+            message = data.get('message', []) or []
+            raw_html = ''.join(message) if isinstance(message, list) else message
+
+        parser = CommentParser()
+        parser.feed(raw_html)
+        parser.close()
+        content = [JmAlbumComment(item) for item in parser.comments]
+
+        return JmAlbumCommentPage(
+            content=content,
+            total=None,
+            page_number=page_number,
+            raw_html=raw_html,
+            raw_data=data,
+        )
 
     @classmethod
     def adapt_content(cls, content):
@@ -733,6 +971,8 @@ class JmApiAdaptTool:
             'related_list',
             'name',
             'description',
+            'is_favorite',
+            'liked',
             ('id', 'album_id'),
             ('author', 'authors'),
             ('total_views', 'views'),
@@ -788,7 +1028,10 @@ class JmApiAdaptTool:
                 (chapter.id, chapter.sort, chapter.name)
             )
         fields['episode_list'] = episode_list
-        for it in 'scramble_id', 'page_count', 'pub_date', 'update_date':
+        fields['page_count'] = int(data['total_photos'])
+        fields['pub_date'] = datetime.fromtimestamp(int(data['addtime'])).strftime('%Y-%m-%d')
+
+        for it in 'scramble_id', 'update_date':
             fields[it] = '0'
 
     @classmethod

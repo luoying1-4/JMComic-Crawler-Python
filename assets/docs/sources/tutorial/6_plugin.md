@@ -4,7 +4,7 @@ plugin(扩展/插件)是v2.2.0新引入的机制，使用插件可以实现灵�
 
 目前jmcomic已经内置了一些插件，源码位于 src/jmcomic/jm_plugin.py。
 
-你可以在这里查看这些插件的配置→ [option_file_syntax](../option_file_syntax.md#3-option插件配置项)
+你可以在这里查看这些插件的配置→ [option_file_syntax](../option_file_syntax.md#3-option)
 
 ## 1. 插件机制介绍
 
@@ -54,7 +54,59 @@ option = jmcomic.create_option_by_file('xxx.yml')  # 创建option对象
 option.download_album(123)
 ```
 
-## 3. 怎么手动调用插件
+## 3. 综合示例：登录、增量下载与分章压缩
+
+下面把多个插件组合起来，完成这些需求：
+
+1. 使用登录状态下载本子；
+2. 只下载指定章节之后的新章节；
+3. 将图片转换为 JPG；
+4. 每个章节分别压缩，并在压缩成功后删除原图片。
+
+先创建并加载配置文件：
+
+```python
+from jmcomic import create_option
+
+# 加载配置时会执行 after_init 插件，其中 find_update 会开始下载
+create_option('myoption.yml')
+```
+
+然后在 `myoption.yml` 中组合插件：
+
+```yaml
+dir_rule:
+  rule: Bd_Aid
+  base_dir: ./downloads
+
+download:
+  image:
+    suffix: .jpg
+
+plugins:
+  after_init:
+    - plugin: login
+      kwargs:
+        username: your_username
+        password: your_password
+
+    - plugin: find_update
+      kwargs:
+        145504: 290266  # 只下载本子 145504 中章节 290266 之后的新章节
+
+  after_album:
+    - plugin: zip
+      kwargs:
+        level: photo
+        filename_rule: Ptitle
+        zip_dir: ./downloads
+        delete_original_file: true
+```
+
+这里的执行顺序是：先登录，再由 `find_update` 发起增量下载；每个本子下载完成后，`zip` 插件按章节生成压缩文件并删除已成功压缩的原图片。
+
+
+## 4. 怎么手动调用插件
 
 你可以使用下面的代码触发某个事件
 
@@ -70,7 +122,7 @@ option.call_all_plugin('my_event')
 
 ```
 
-## 4. 示例：自定义插件
+## 5. 示例：自定义插件
 
 * 如果你有好的plugin想法，也欢迎向我提PR，将你的plugin内置到jmcomic模块中
 
@@ -118,4 +170,43 @@ from jmcomic import create_option
 
 option = create_option('xxx')
 ```
+
+## 高级：异步插件生命周期控制
+
+如果你编写的插件是异步的（比如启动了新线程处理任务），此时主程序可能会先于插件执行完毕而退出。为解决此问题，`JmOptionPlugin` 提供了注册等待挂起的功能：
+
+```python
+import threading
+import time
+from jmcomic import JmOptionPlugin, JmModuleConfig
+
+class MyAsyncPlugin(JmOptionPlugin):
+    plugin_key = 'my_async_plugin'
+
+    def invoke(self, **kwargs) -> None:
+        # 1. 告诉 option 有一个异步插件正在运行，请主线程在退出前关掉我或等我
+        self.enter_wait_list()
+        self.is_running = True
+        
+        # 2. 启动一个新的线程...
+        self.thread = threading.Thread(target=self.do_async_work)
+        self.thread.start()
+    
+    def do_async_work(self):
+        while self.is_running:
+            print('异步工作运行中...')
+            time.sleep(1)
+
+    def wait_until_finish(self):
+        # 3. 覆写 wait_until_finish 方法，实现优雅停机 / 强制阻塞等待的逻辑
+        # 主程序在结束时必定会调用它（如果此前挂起了该插件）
+        self.is_running = False # 发送停机信号
+        if hasattr(self, 'thread') and self.thread.is_alive():
+            self.thread.join() # 阻塞直到线程安全退出
+
+JmModuleConfig.register_plugin(MyAsyncPlugin)
+```
+
+这样，程序在所有任务执行完退出的最后一刻，会通过 `option.wait_all_plugins_finish()` 遍历所有调用过 `enter_wait_list()` 挂起的插件，并调用其 `wait_until_finish()` 方法。只要你在该方法中实现了停机信号或阻塞等待的发送，主线程就会等待你的异步逻辑全部安全并优雅地退出。
+
 

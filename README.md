@@ -1,6 +1,14 @@
 <!-- 顶部标题 & 统计徽章 -->
 <div align="center">
   <h1 style="margin-top: 0" align="center">Python API for JMComic</h1>
+
+  <p align="center">
+    <strong>简体中文</strong> •
+    <a href="./assets/readme/README-en.md">English</a> •
+    <a href="./assets/readme/README-jp.md">日本語</a> •
+    <a href="./assets/readme/README-kr.md">한국어</a>
+  </p>
+
   <p align="center">
   <strong>提供 Python API 访问禁漫天堂（网页端 & 移动端），集成 GitHub Actions 下载器🚀</strong>
   </p>
@@ -11,21 +19,26 @@
 [![GitHub latest releases](https://img.shields.io/github/v/release/hect0x7/JMComic-Crawler-Python?color=blue&label=version)](https://github.com/hect0x7/JMComic-Crawler-Python/releases/latest)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/jmcomic?style=flat&color=hotpink)](https://pepy.tech/projects/jmcomic)
 [![Licence](https://img.shields.io/github/license/hect0x7/JMComic-Crawler-Python?color=red)](https://github.com/hect0x7/JMComic-Crawler-Python)
+[![Used by](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fhect0x7%2Fhect0x7%2Fused-by%2Fmanifest.json&query=%24.public_dependents&label=used%20by&color=6f42c1&style=flat)](https://github.com/hect0x7/JMComic-Crawler-Python/network/dependents)
 
 </div>
-
-
 
 
 > 本项目封装了一套可用于爬取JM的Python API.
 > 
 > 你可以通过简单的几行Python代码，实现下载JM上的本子到本地，并且是处理好的图片。
 > 
+> **🧭 快速指路**
+> - [教程：使用 GitHub Actions 下载禁漫本子](./assets/docs/sources/tutorial/1_github_actions.md)
+> - [教程：导出并下载你的禁漫收藏夹数据](./assets/docs/sources/tutorial/10_export_favorites.md)
+> - [教程：下载后转为 PDF / ZIP / 长图](./assets/docs/sources/tutorial/13_export_and_feature.md)
+> - [塔台广播：欢迎各位机长加入并贡献代码](./.github/CONTRIBUTING.md)
+> 
 > **友情提示：珍爱JM，为了减轻JM的服务器压力，请不要一次性爬取太多本子，西门🙏🙏🙏**.
+> 
 
-[【指路】教程：使用GitHub Actions下载禁漫本子](./assets/docs/sources/tutorial/1_github_actions.md)
 
-[【指路】教程：导出并下载你的禁漫收藏夹数据](./assets/docs/sources/tutorial/10_export_favorites.md)
+![introduction.jpg](https://raw.githubusercontent.com/hect0x7/hect0x7/master/images/jmcomic-intro-main.png)
 
 
 ## 项目介绍
@@ -40,20 +53,22 @@
 
 - 登录
 - 搜索本子（支持所有搜索项）
-- 图片下载解码
+- 获取本子评论（包括回评、剧透标识）
 - 分类/排行榜
-- 本子/章节详情
+- 获取本子/章节详情
+- 图片下载解码
 - 个人收藏夹
 - 接口加解密（APP的接口）
 
 ## 安装教程
 
-> ⚠如果你没有安装过Python，需要先安装Python再执行下面的步骤，且版本需要>=3.7（[点我去python官网下载](https://www.python.org/downloads/)）
+> ⚠如果你没有安装过 Python，需要先前往 [Python 官网下载](https://www.python.org/downloads/) 再执行以下步骤。
+>**推荐使用 Python 3.14**
 
 * 通过pip官方源安装（推荐，并且更新也是这个命令）
 
   ```shell
-  pip install jmcomic -i https://pypi.org/project -U
+  pip install jmcomic -U
   ```
 * 通过源代码安装
 
@@ -70,6 +85,10 @@
 ```python
 import jmcomic  # 导入此模块，需要先安装.
 jmcomic.download_album('123')  # 传入要下载的album的id，即可下载整个album到本地.
+
+# 也可以使用 Async API (详见教程: https://jmcomic.readthedocs.io/zh-cn/latest/tutorial/14_async_usage/)
+import asyncio
+asyncio.run(jmcomic.download_album_async('123'))
 ```
 
 上面的 `download_album`方法还有一个参数`option`，可用于控制下载配置，配置包括禁漫域名、网络代理、图片格式转换、插件等等。
@@ -103,13 +122,12 @@ jmcomic.download_album(123, option)
 ```
 
 ### 3. 使用命令行
+> [!TIP]
 > 如果只想下载本子，使用命令行会比上述方式更加简单直接
 > 
-> 例如，在windows上，直接按下win+r键，输入jmcomic xxx就可以下载本子。
+> 例如，在windows上，直接按下 win+R 键，输入`jmcomic xxx`就可以下载本子。
 
-示例：
-
-下载本子123的命令
+示例：下载本子123的命令
 
 ```sh
 jmcomic 123
@@ -121,25 +139,87 @@ jmcomic 123 p456
 
 命令行模式也支持自定义option，你可以使用环境变量或者命令行参数：
 
-a. 通过命令行--option参数指定option文件路径
+a. 通过命令行 --option 参数指定option文件路径
 
 ```sh
 jmcomic 123 --option="D:/a.yml"
 ```
 
-b. 配置环境变量 `JM_OPTION_PATH` 为option文件路径（推荐）
+b. 命令行不改，而是配置环境变量 `JM_OPTION_PATH` 为option文件路径（推荐）
 
+> [!TIP]
 > 请自行google配置环境变量的方式，或使用powershell命令:  `setx JM_OPTION_PATH "D:/a.yml"` 重启后生效
 
+
+另外，`jmcomic` 还提供了一个美观的进度条能力，默认是开启的，但是需要你手动安装一个额外依赖 `pip install rich`。效果如下：
+
+![jmcomic 命令行下载进度](./assets/docs/sources/images/download_progress_terminal.png)
+
+详细开启方法参考文档：[启用美观的下载进度条](assets/docs/sources/tutorial/15_download_progress.md)
+
+
+### 4. 查看本子详情（jmv 命令）
+
+> [!NOTE]
+> `jmv` 命令用于快速查看本子详情，不做下载。
+> 
+> **适用场景**：在某些网站上看到一串*神秘车号*，想快速看看具体是啥本子。此时只需copy原文本，按下 win+R，输入`jmv [粘贴内容]`即可
+>
+> 支持从任意文本中提取数字作为车号，方便直接粘贴各种格式的车号。
+
+示例：
+
 ```sh
-jmcomic 123
+# 直接输入车号
+jmv 350234
+
+# 从混合文本中提取数字（提取出 350234）
+jmv 350谁还没看过234
+
+# 指定option文件（也支持环境变量，用法同上）
+jmv 350234 --option="D:/a.yml"
+
+# -y 参数：执行完毕后直接退出，无需按回车确认
+jmv 350234 -y
+```
+
+输出效果：
+
+```text
+🔍 正在查询 禁漫车号 - [350234] 的详情...
+
+──────────────────────────────────────────────────
+  📖 标题:  xxx
+  🆔 ID:    JM350234
+  🔗 链接:  https://18comic.vip/album/350234/
+  ✍️ 作者:  Author1, Author2
+──────────────────────────────────────────────────
+  📅 发布日期:  2022-06-15
+  📅 更新日期:  2023-01-01
+  📄 总页数:    50
+  👀 观看:      2M
+  ❤️ 点赞:     77K
+  💬 评论:      9801
+──────────────────────────────────────────────────
+  🏷️ 标签:  标签1, 标签2, ...
+  🎭 人物:  角色A, 角色B, ...
+  📚 作品:  作品1, 作品2, ...
+──────────────────────────────────────────────────
+  📑 章节 (2):
+     第1話  上  (id: 350234)
+     第2話  下  (id: 350235)
+──────────────────────────────────────────────────
+
+[运行结束] 请按回车键关闭窗口... (下次运行可附加 -y 参数跳过确认)
 ```
 
 
 
 ## 进阶使用
 
-请查阅文档首页→[jmcomic.readthedocs.io](https://jmcomic.readthedocs.io/zh-cn/latest)
+请查阅文档首页 → [jmcomic.readthedocs.io](https://jmcomic.readthedocs.io/zh-cn/latest)
+
+或者查看github仓库的文档 → [github-repo-docs](https://github.com/hect0x7/JMComic-Crawler-Python/blob/master/assets/docs/sources/tutorial/0_common_usage.md)
 
 （提示：jmcomic提供了很多下载配置项，大部分的下载需求你都可以尝试寻找相关配置项或插件来实现。）
 
@@ -147,6 +227,7 @@ jmcomic 123
 
 - **绕过Cloudflare的反爬虫**
 - **实现禁漫APP接口最新的加解密算法 (1.6.3)**
+- 支持**Async**和**Sync**两套 API
 - 用法多样：
 
   - GitHub
@@ -155,7 +236,7 @@ jmcomic 123
   - Python代码：最本质、最强大的使用方式，需要你有一定的python编程基础
 - 支持**网页端**和**移动端**两种客户端实现，可通过配置切换（**移动端不限ip兼容性好，网页端限制ip地区但效率高**）
 - 支持**自动重试和域名切换**机制
-- **多线程下载**（可细化到一图一线程，效率极高）
+- 支持按下载任务维度结构化收集日志
 - **可配置性强**
 
   - 不配置也能使用，十分方便
@@ -164,27 +245,18 @@ jmcomic 123
     等
 - **可扩展性强**
 
-  - 支持自定义本子/章节/图片下载前后的回调函数
+  - 支持自定义本子/章节/图片下载前后事件的回调函数
   - 支持自定义类：`Downloader（负责调度）` `Option（负责配置）` `Client（负责请求）` `实体类`等
   - 支持自定义日志、异常监听器
-  - **支持Plugin插件，可以方便地扩展功能，以及使用别人的插件，目前内置插件有**：
-    - `登录插件`
-    - `硬件占用监控插件`
-    - `只下载新章插件`
-    - `压缩文件插件`
-    - `下载特定后缀图片插件`
-    - `发送QQ邮件插件`
-    - `自动使用浏览器cookies插件`
-    - `导出收藏夹为csv文件插件`
-    - `合并所有图片为pdf文件插件`
-    - `合并所有图片为长图png插件`
-    - `重复文件检测删除插件`
-    - `网页观看本地章节插件`
+  - **支持 Plugin 扩展，目前内置 21 个实用插件，包括**：`美观下载进度条`、`图片合并 PDF`、`一图流长图拼接`、`生成zip/7z压缩包`、`浏览器 Cookie 获取`、`订阅更新`、`收藏夹导出`、`封面下载`等。
 
 ## 使用小说明
 
-* Python >= 3.7，建议3.9以上，因为jmcomic的依赖库可能会不支持3.9以下的版本。
-* 个人项目，文档和示例会有不及时之处，可以Issue提问
+* 推荐使用 **Python 3.14**，目前 CI 只覆盖 Python 3.10 及以上版本。
+  > [!NOTE]
+  > Python 3.9 及更早版本均已结束官方支持 (EOL)，使用3.9及以下随时有可能遇到第三方库不兼容的问题。Python 3.9 仍保留安装兼容，但不再纳入 CI。
+
+* 个人项目，文档和示例会有不及时之处，可以Issue提问。
 
 ## 项目文件夹介绍
 
@@ -210,3 +282,21 @@ jmcomic 123
     <img alt="Repo Card" src="https://github-readme-stats.vercel.app/api/pin/?username=tonquer&repo=JMComic-qt" />
   </picture>
 </a>
+
+## used by 项目
+
+<a href="https://github.com/hect0x7/JMComic-Crawler-Python/network/dependents">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hect0x7/hect0x7/used-by/showcase/zh-CN-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/hect0x7/hect0x7/used-by/showcase/zh-CN-light.svg" />
+    <img width="100%" alt="使用 jmcomic 的项目" src="https://raw.githubusercontent.com/hect0x7/hect0x7/used-by/showcase/zh-CN-light.svg" />
+  </picture>
+</a>
+
+## Star History
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/hect0x7/hect0x7/output/profile/star-history-dark.svg" />
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/hect0x7/hect0x7/output/profile/star-history.svg" />
+  <img width="100%" alt="jmcomic 生态 Star History" src="https://raw.githubusercontent.com/hect0x7/hect0x7/output/profile/star-history.svg" />
+</picture>
